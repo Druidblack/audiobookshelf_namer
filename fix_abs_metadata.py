@@ -388,6 +388,23 @@ def ensure_no_metadata_tag(
     patch_book_tags(session, base_url, item_id, new_tags, dry_run=dry_run)
     return True
 
+# ======================================================================
+# НОВОЕ: если метаданные найдены у провайдера — считаем, что теги уже разобраны
+# ======================================================================
+
+def mark_tags_done_by_provider(item_state: Dict[str, Any],
+                               curr_album: Optional[str],
+                               curr_artist: Optional[str]) -> None:
+    """
+    Помечаем книгу как уже обработанную по тегам,
+    чтобы при следующих запусках не тратить время на повторный разбор.
+    """
+    item_state["tags_done"] = True
+    item_state["last_tag_album"] = curr_album
+    item_state["last_tag_artist"] = curr_artist
+    item_state["tags_done_reason"] = "provider"
+
+
 
 
 
@@ -1360,6 +1377,7 @@ def run_once(args: argparse.Namespace,
 
                                 if use_cache:
                                     item_state["fantlab_applied"] = True
+                                    mark_tags_done_by_provider(item_state, curr_album, curr_artist)
 
                         else:
                             print(
@@ -1395,6 +1413,7 @@ def run_once(args: argparse.Namespace,
 
                             if use_cache:
                                 item_state["fantlab_applied"] = True
+                                mark_tags_done_by_provider(item_state, curr_album, curr_artist)
 
                     else:
                         print(
@@ -1430,6 +1449,7 @@ def run_once(args: argparse.Namespace,
 
                         if use_cache:
                             item_state["fantlab_applied"] = True
+                            mark_tags_done_by_provider(item_state, curr_album, curr_artist)
 
         print(f"\nИтого по библиотеке {lib_name!r}:")
         print(f"  Всего книг: {len(item_ids)}")
