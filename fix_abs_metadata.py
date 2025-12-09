@@ -336,6 +336,60 @@ def patch_book_metadata(
     except Exception as e:
         print(f"  !!! Ошибка PATCH /items/{item_id}/media: {e} — {resp.text}")
 
+# ======================================================================
+# НОВОЕ: тег для книг без найденных метаданных
+# ======================================================================
+
+NO_METADATA_TAG = "нет метаданных"
+
+def patch_book_tags(
+    session: requests.Session,
+    base_url: str,
+    item_id: str,
+    tags: List[str],
+    dry_run: bool = True,
+) -> None:
+    if tags is None:
+        return
+
+    payload = {"tags": tags}
+
+    if dry_run:
+        print(f"  [DRY-RUN][ABS Tags] PATCH /api/items/{item_id}/media tags={tags}")
+        return
+
+    resp = session.patch(f"{base_url}/api/items/{item_id}/media", json=payload)
+    try:
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"  !!! Ошибка PATCH tags /items/{item_id}/media: {e} — {resp.text}")
+
+
+def ensure_no_metadata_tag(
+    session: requests.Session,
+    base_url: str,
+    item: Dict[str, Any],
+    dry_run: bool = True,
+) -> bool:
+    item_id = item.get("id")
+    if not item_id:
+        return False
+
+    media = item.get("media") or {}
+    current = media.get("tags") or []
+    if not isinstance(current, list):
+        current = []
+
+    if NO_METADATA_TAG in current:
+        return False
+
+    new_tags = current + [NO_METADATA_TAG]
+    print(f"  [ABS Tags] Добавляем тег {NO_METADATA_TAG!r}")
+    patch_book_tags(session, base_url, item_id, new_tags, dry_run=dry_run)
+    return True
+
+
+
 
 # ======================================================================
 # ОЧИСТКА/НОРМАЛИЗАЦИЯ НАЗВАНИЙ
@@ -391,6 +445,68 @@ def _normalize_text(s: str) -> str:
     s = re.sub(r"[^0-9a-zа-яё\s]+", " ", s)
     s = re.sub(r"\s+", " ", s)
     return s.strip()
+
+# ======================================================================
+# НОВОЕ: эквивалентность "е/ё" для поиска и проверки названий
+# ======================================================================
+
+def _yo_to_e(s: str) -> str:
+    if not s:
+        return ""
+    return s.replace("ё", "е").replace("Ё", "Е")
+
+
+def is_title_compatible_yo_equiv(reference_title: str, candidate_title: str) -> bool:
+    """
+    Обертка над существующей is_title_compatible.
+    Ничего не меняем внутри старой функции — только подаем нормализованные строки.
+    """
+    return is_title_compatible(_yo_to_e(reference_title), _yo_to_e(candidate_title))
+
+
+def provider_result_is_safe_variative_yo_equiv(reference_title: str,
+                                               search_author: Optional[str],
+                                               result: Dict[str, Any],
+                                               label: str) -> bool:
+    """
+    Обертка над существующей provider_result_is_safe_variative.
+    Внутренние функции не трогаем.
+    """
+    if not result:
+        return False
+
+    ref2 = _yo_to_e(reference_title)
+
+    # копия результата с нормализованным title
+    res2 = dict(result)
+    t = res2.get("title")
+    if isinstance(t, str):
+        res2["title"] = _yo_to_e(t)
+
+    return provider_result_is_safe_variative(ref2, search_author, res2, label)
+
+
+def search_book_yo_equiv(session: requests.Session,
+                         base_url: str,
+                         title: str,
+                         author: Optional[str],
+                         provider: str) -> Optional[Dict[str, Any]]:
+    """
+    Обертка над существующей search_fantlab_book:
+    пробуем исходный title и вариант с ё→е.
+    """
+    title = title or ""
+    variants = [title]
+    t2 = _yo_to_e(title)
+    if t2 and t2 != title:
+        variants.append(t2)
+
+    for t in variants:
+        res = search_fantlab_book(session, base_url, title=t, author=author, provider=provider)
+        if res:
+            return res
+    return None
+
 
 
 # ======================================================================
@@ -1159,9 +1275,8 @@ def run_once(args: argparse.Namespace,
                     search_author = new_author_str or info.get("old_author")
 
                     # 1) FantLab
-                    fl_result = search_fantlab_book(
-                        session,
-                        base_url,
+                    fl_result = search_book_yo_equiv(
+                        session, base_url,
                         title=search_title,
                         author=search_author,
                         provider=args.fantlab_provider,
@@ -1173,43 +1288,44 @@ def run_once(args: argparse.Namespace,
                         item_state["fantlab_last_author"] = search_author
 
                     # НОВОЕ: используем вариативную safety-проверку
-                    if fl_result and not provider_result_is_safe_variative(reference_title, search_author, fl_result, "FantLab"):
+                    if fl_result and not provider_result_is_safe_variative_yo_equiv(reference_title, search_author, fl_result, "FantLab"):
                         fl_result = None
 
                     if not fl_result:
                         print("  [FantLab] Ничего безопасного не найдено. Пробуем Google Books...")
 
                         # 2) Google Books
-                        gb_result = search_fantlab_book(
-                            session,
-                            base_url,
+                        gb_result = search_book_yo_equiv(
+                            session, base_url,
                             title=search_title,
                             author=search_author,
                             provider=args.google_provider,
                         )
 
-                        if gb_result and not provider_result_is_safe_variative(reference_title, search_author, gb_result, "Google"):
+                        if gb_result and not provider_result_is_safe_variative_yo_equiv(reference_title, search_author, gb_result, "Google"):
                             gb_result = None
 
                         if not gb_result:
                             print("  [Google] Ничего безопасного не найдено. Пробуем Audible...")
 
                             # 3) Audible
-                            ab_result = search_fantlab_book(
-                                session,
-                                base_url,
+                            ab_result = search_book_yo_equiv(
+                                session, base_url,
                                 title=search_title,
                                 author=search_author,
                                 provider=args.audible_provider,
                             )
 
-                            if ab_result and not provider_result_is_safe_variative(reference_title, search_author, ab_result, "Audible"):
+                            if ab_result and not provider_result_is_safe_variative_yo_equiv(reference_title, search_author, ab_result, "Audible"):
                                 ab_result = None
 
                             if not ab_result:
                                 print("  [Audible] Ничего безопасного не найдено для этого заголовка.")
+                                ensure_no_metadata_tag(session, base_url, item, dry_run=args.dry_run)
                                 if use_cache:
                                     item_state["fantlab_applied"] = False
+
+
                             else:
                                 print(
                                     "  [Audible] Найдено соответствие: "
