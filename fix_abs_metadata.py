@@ -32,7 +32,10 @@ except ImportError:
 # ======================================================================
 
 ABS_BASE_URL_ENV = os.environ.get("ABS_BASE_URL", "http://192.168.1.161:16378")
-ABS_TOKEN_ENV = os.environ.get("ABS_TOKEN", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJrZXlJZCI6IjY1NThhZDE5LWM2MDUtNDE3Ni1iMjY2LTE3Y2QzNzE0NjE1MCIsIm5hbWUiOiI2NjY2IiwidHlwZSI6ImFwaSIsImlhdCI6MTc2NDc4ODMyOH0.3xd1NmYZXPvmrUA4CF5Eym0RsUg2VzzplBXDQcxvGuQ")
+ABS_TOKEN_ENV = os.environ.get(
+    "ABS_TOKEN",
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJrZXlJZCI6IjY1NThhZDE5LWM2MDUtNDE3Ni1iMjY2LTE3Y2QzNzE0NjE1MCIsIm5hbWUiOiI2NjY2IiwidHlwZSI6ImFwaSIsImlhdCI6MTc2NDc4ODMyOH0.3xd1NmYZXPvmrUA4CF5Eym0RsUg2VzzplBXDQcxvGuQ"
+)
 
 ABS_DRY_RUN_ENV = os.environ.get("ABS_DRY_RUN", "0")
 DEFAULT_DRY_RUN = ABS_DRY_RUN_ENV.lower() in ("1", "true", "yes", "y", "on")
@@ -405,9 +408,6 @@ def mark_tags_done_by_provider(item_state: Dict[str, Any],
     item_state["tags_done_reason"] = "provider"
 
 
-
-
-
 # ======================================================================
 # ОЧИСТКА/НОРМАЛИЗАЦИЯ НАЗВАНИЙ
 # ======================================================================
@@ -523,7 +523,6 @@ def search_book_yo_equiv(session: requests.Session,
         if res:
             return res
     return None
-
 
 
 # ======================================================================
@@ -751,17 +750,13 @@ def author_name_matches_variative(search_name: str, candidate_name: str) -> bool
     if not inter:
         return False
 
-    # Главное правило: один набор должен покрывать другой
-    # (переживает отсутствие отчества).
     if s_core.issubset(c_core) or c_core.issubset(s_core):
         return True
 
-    # Если в поиске 2+ смысловых токена — допускаем высокий процент совпадения
     if len(s_core) >= 2:
         overlap = len(inter) / max(1, len(s_core))
         return overlap >= 0.8
 
-    # Если остался 1 токен — требуем его наличия
     only = next(iter(s_core))
     return only in c_core
 
@@ -1255,6 +1250,12 @@ def run_once(args: argparse.Namespace,
                     }
 
                 if updates is None and not args.use_fantlab:
+                    # --- НОВОЕ: сохраняем состояние после книги ---
+                    if use_cache and not args.dry_run:
+                        try:
+                            save_state(args.cache_file, state)
+                        except Exception as e:
+                            print(f"  [State] Ошибка сохранения состояния после книги {item_id}: {e}")
                     continue
 
                 total_touched += 1
@@ -1286,6 +1287,12 @@ def run_once(args: argparse.Namespace,
 
                     if not should_try_provider:
                         total_provider_skipped += 1
+                        # --- НОВОЕ: сохраняем состояние после книги ---
+                        if use_cache and not args.dry_run:
+                            try:
+                                save_state(args.cache_file, state)
+                            except Exception as e:
+                                print(f"  [State] Ошибка сохранения состояния после книги {item_id}: {e}")
                         continue
 
                     search_title = new_title or info.get("old_title") or ""
@@ -1304,7 +1311,6 @@ def run_once(args: argparse.Namespace,
                         item_state["fantlab_last_title"] = search_title
                         item_state["fantlab_last_author"] = search_author
 
-                    # НОВОЕ: используем вариативную safety-проверку
                     if fl_result and not provider_result_is_safe_variative_yo_equiv(reference_title, search_author, fl_result, "FantLab"):
                         fl_result = None
 
@@ -1341,7 +1347,6 @@ def run_once(args: argparse.Namespace,
                                 ensure_no_metadata_tag(session, base_url, item, dry_run=args.dry_run)
                                 if use_cache:
                                     item_state["fantlab_applied"] = False
-
 
                             else:
                                 print(
@@ -1450,6 +1455,15 @@ def run_once(args: argparse.Namespace,
                         if use_cache:
                             item_state["fantlab_applied"] = True
                             mark_tags_done_by_provider(item_state, curr_album, curr_artist)
+
+                # =========================================================
+                # НОВОЕ: сохраняем состояние после обработки КАЖДОЙ книги
+                # =========================================================
+                if use_cache and not args.dry_run:
+                    try:
+                        save_state(args.cache_file, state)
+                    except Exception as e:
+                        print(f"  [State] Ошибка сохранения состояния после книги {item_id}: {e}")
 
         print(f"\nИтого по библиотеке {lib_name!r}:")
         print(f"  Всего книг: {len(item_ids)}")
