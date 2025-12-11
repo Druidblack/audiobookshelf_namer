@@ -26,6 +26,7 @@ jobs:
           context: .
           file: Dockerfile
           pull: true
+          push: true
           tags: |
             ghcr.io/druidblack/audiobookshelf_namer:latest
             ghcr.io/druidblack/audiobookshelf_namer:${{ github.sha }}
