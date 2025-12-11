@@ -53,6 +53,16 @@ try:
 except ValueError:
     DEFAULT_RUN_INTERVAL_MIN = 0
 
+ABS_WAIT_SCAN_ENV = os.environ.get("ABS_WAIT_SCAN", "1")
+ABS_WAIT_SCAN_ENABLED = ABS_WAIT_SCAN_ENV.lower() in ("1", "true", "yes", "y", "on")
+
+ABS_SCAN_CHECK_INTERVAL_ENV = os.environ.get("ABS_SCAN_CHECK_INTERVAL", "10")
+try:
+    ABS_SCAN_CHECK_INTERVAL = max(1, int(ABS_SCAN_CHECK_INTERVAL_ENV))
+except ValueError:
+    ABS_SCAN_CHECK_INTERVAL = 10
+
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -204,6 +214,67 @@ def get_item_state(state: Dict[str, Any], item_id: str) -> Dict[str, Any]:
         item_state = {}
         items[item_id] = item_state
     return item_state
+
+# ======================================================================
+# ОЖИДАНИЕ СКАНИРОВАНИЯ БИБЛИОТЕКИ В ABS
+# ======================================================================
+
+def abs_has_running_tasks(session: requests.Session, base_url: str) -> bool:
+    """
+    Возвращает True, если в ABS сейчас есть активные задачи (в первую очередь
+    сканирование библиотек). Основано на неофициальном эндпоинте /api/tasks.
+    Если эндпоинт недоступен, функция тихо возвращает False.
+    """
+    if not ABS_WAIT_SCAN_ENABLED:
+        return False
+
+    url = f"{base_url.rstrip('/')}/api/tasks"
+    try:
+        resp = session.get(url, timeout=10)
+    except Exception as e:
+        print(f"[ABS scan] Не удалось запросить /api/tasks: {e}")
+        return False
+
+    if resp.status_code != 200:
+        print(
+            f"[ABS scan] /api/tasks вернул статус {resp.status_code}. "
+            "Проверка сканирования будет пропущена для этого запроса.",
+        )
+        return False
+
+    try:
+        data = resp.json()
+    except ValueError:
+        print("[ABS scan] Ответ /api/tasks не является JSON. Пропускаем проверку.")
+        return False
+
+    tasks = data.get("tasks")
+    if not isinstance(tasks, list):
+        return False
+
+    # /api/tasks обычно содержит только активные задачи
+    return len(tasks) > 0
+
+
+def wait_while_abs_scanning(session: requests.Session, base_url: str) -> None:
+    """
+    Блокирующее ожидание, пока в ABS есть активные задачи.
+    Если ABS_WAIT_SCAN отключён, функция ничего не делает.
+    """
+    if not ABS_WAIT_SCAN_ENABLED:
+        return
+
+    while abs_has_running_tasks(session, base_url):
+        print(
+            f"[ABS scan] Обнаружено сканирование/фоновая задача в ABS. "
+            f"Ждём {ABS_SCAN_CHECK_INTERVAL} сек...",
+        )
+        try:
+            time.sleep(ABS_SCAN_CHECK_INTERVAL)
+        except KeyboardInterrupt:
+            print("\nОжидание сканирования прервано пользователем (Ctrl+C). Выход.")
+            raise
+
 
 
 # ======================================================================
@@ -1179,6 +1250,9 @@ def run_once(args: argparse.Namespace,
         print("Режим: реальные изменения (PATCH /items/<ID>/media).\n")
 
     for lib in libraries:
+        # На входе в каждую библиотеку ждём окончания сканирования
+        wait_while_abs_scanning(session, base_url)
+
         lib_id = lib["id"]
         lib_name = lib.get("name")
         print(f"=== Библиотека {lib_name!r} ({lib_id}) ===")
@@ -1195,6 +1269,9 @@ def run_once(args: argparse.Namespace,
         total_provider_skipped = 0
 
         for batch in chunked(item_ids, args.batch_size):
+            # Между батчами также проверяем: если ABS запустил сканирование, ждём
+            wait_while_abs_scanning(session, base_url)
+
             items = batch_get_items(session, base_url, batch)
             for item in items:
                 if item.get("mediaType") != "book":
@@ -1520,6 +1597,8 @@ def main() -> None:
     interval_min = DEFAULT_RUN_INTERVAL_MIN
 
     if interval_min <= 0:
+        # Одиночный запуск — сначала ждём окончания сканирования
+        wait_while_abs_scanning(session, base_url)
         run_once(args, session, base_url, state, use_cache)
         if use_cache and not args.dry_run:
             save_state(args.cache_file, state)
@@ -1529,6 +1608,8 @@ def main() -> None:
         while True:
             iteration += 1
             print(f"\n===== Итерация {iteration} =====")
+            # Перед каждой итерацией ждём окончания сканирования
+            wait_while_abs_scanning(session, base_url)
             run_once(args, session, base_url, state, use_cache)
             if use_cache and not args.dry_run:
                 save_state(args.cache_file, state)
