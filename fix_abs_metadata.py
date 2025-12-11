@@ -48,7 +48,6 @@ except ValueError:
     ABS_SCAN_CHECK_INTERVAL = 10
 
 
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Исправление метаданных книг в Audiobookshelf "
