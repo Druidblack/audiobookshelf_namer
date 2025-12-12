@@ -1,5 +1,8 @@
 📚 **Audiobookshelf namer**
 
+![1](https://github.com/Druidblack/audiobookshelf_namer/blob/main/img/1.jpg)
+![2](https://github.com/Druidblack/audiobookshelf_namer/blob/main/img/2.jpg)
+
 Автоматическое исправление, нормализация и загрузка метаданных в Audiobookshelf
 
 🚀 **Что делает эта программа?**
