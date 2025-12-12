@@ -195,7 +195,7 @@ def clear_log_file() -> None:
     if not path:
         return
     try:
-        with open(path, "w", encoding="utf-8"):
+        with open(path, "w", encoding="cp1251"):
             pass
     except Exception:
         # Не мешаем работе скрипта, если лог не очистился
@@ -217,7 +217,7 @@ def setup_logging_to_file() -> None:
         path = ABS_LOG_FILE_ENV
         if path:
             try:
-                with open(path, 'a', encoding='utf-8') as f:
+                with open(path, 'a', encoding='cp1251') as f:
                     f.write(text)
             except Exception:
                 # Не мешаем основному выводу, если запись лога сломалась
