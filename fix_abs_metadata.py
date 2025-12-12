@@ -8,6 +8,9 @@ import time
 from typing import List, Tuple, Dict, Any, Optional
 from io import BytesIO
 
+import builtins
+import sys
+
 import requests
 
 try:
@@ -33,7 +36,7 @@ ABS_CACHE_FILE_ENV = os.environ.get("ABS_CACHE_FILE", "abs_metadata_state.json")
 ABS_DISABLE_CACHE_ENV = os.environ.get("ABS_DISABLE_CACHE", "0")
 DEFAULT_DISABLE_CACHE = ABS_DISABLE_CACHE_ENV.lower() in ("1", "true", "yes", "y", "on")
 
-ABS_RUN_INTERVAL_MIN_ENV = os.environ.get("ABS_RUN_INTERVAL_MINUTES", "60")
+ABS_RUN_INTERVAL_MIN_ENV = os.environ.get("ABS_RUN_INTERVAL_MINUTES", "2")
 try:
     DEFAULT_RUN_INTERVAL_MIN = int(ABS_RUN_INTERVAL_MIN_ENV)
 except ValueError:
@@ -48,6 +51,10 @@ try:
 except ValueError:
     ABS_SCAN_CHECK_INTERVAL = 10
 
+ABS_LOG_FILE_ENV = os.environ.get("ABS_LOG_FILE", "fix_abs_metadata.log")
+
+# Сохраняем оригинальный print, чтобы дублировать вывод в лог
+ORIGINAL_PRINT = print
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -156,6 +163,68 @@ def build_session(base_url: str, token: Optional[str]) -> Tuple[requests.Session
         headers["Authorization"] = f"Bearer {token}"
     session.headers.update(headers)
     return session, base_url
+
+# ======================================================================
+# ЛОГ-ФАЙЛ
+# ======================================================================
+
+def append_log_line(message: str) -> None:
+    """
+    Записать строку в лог-файл с временной меткой.
+    Путь задаётся ABS_LOG_FILE (или используется значение по умолчанию).
+    Если путь пустой или запись не удалась — пишем предупреждение в stdout.
+    """
+    path = ABS_LOG_FILE_ENV
+    if not path:
+        return
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{timestamp}] {message}\n"
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception as e:
+        print(f"[LOG] Не удалось записать в файл {path!r}: {e}")
+
+# ======================================================================
+# ЛОГ-ФАЙЛ И ДУБЛИРОВАНИЕ ВЫВОДА В ФАЙЛ
+# ======================================================================
+
+def clear_log_file() -> None:
+    """Очистить лог-файл перед новым сканированием библиотеки."""
+    path = ABS_LOG_FILE_ENV
+    if not path:
+        return
+    try:
+        with open(path, "w", encoding="utf-8"):
+            pass
+    except Exception:
+        # Не мешаем работе скрипта, если лог не очистился
+        return
+
+
+def setup_logging_to_file() -> None:
+    """
+    Настроить глобальный print так, чтобы весь вывод, который мы видим в консоли,
+    дублировался в лог-файл.
+    Лог очищается один раз перед запуском скрипта.
+    """
+    clear_log_file()
+
+    def log_print(*args, **kwargs):
+        sep = kwargs.get('sep', ' ')
+        end = kwargs.get('end', '\n')
+        text = sep.join(str(a) for a in args) + end
+        path = ABS_LOG_FILE_ENV
+        if path:
+            try:
+                with open(path, 'a', encoding='utf-8') as f:
+                    f.write(text)
+            except Exception:
+                # Не мешаем основному выводу, если запись лога сломалась
+                pass
+        ORIGINAL_PRINT(*args, **kwargs)
+
+    builtins.print = log_print
 
 
 # ======================================================================
@@ -1592,6 +1661,10 @@ def main() -> None:
         iteration = 0
         while True:
             iteration += 1
+            # Перед новым циклом сканирования очищаем лог-файл,
+            # чтобы в нём была только информация текущей итерации.
+            clear_log_file()
+
             print(f"\n===== Итерация {iteration} =====")
             # Перед каждой итерацией ждём окончания сканирования
             wait_while_abs_scanning(session, base_url)
@@ -1606,6 +1679,25 @@ def main() -> None:
                 print("\nОстановлено пользователем (Ctrl+C). Выход.")
                 break
 
+def run_with_logging() -> None:
+    """
+    Обёртка над main():
+    - настраивает логирование в файл;
+    - пишет в лог время запуска и окончания работы.
+    """
+    setup_logging_to_file()
+    start_ts = time.time()
+    start_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(start_ts))
+    print(f"[LOG] Запуск скрипта: {start_str}")
+    try:
+        main()
+    finally:
+        end_ts = time.time()
+        end_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(end_ts))
+        duration = end_ts - start_ts
+        print(f"[LOG] Завершение скрипта: {end_str} (duration {duration:.1f} sec)")
+
+
 
 if __name__ == "__main__":
-    main()
+    run_with_logging()
