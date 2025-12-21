@@ -52,6 +52,7 @@ except ValueError:
     ABS_SCAN_CHECK_INTERVAL = 10
 
 ABS_LOG_FILE_ENV = os.environ.get("ABS_LOG_FILE", "fix_abs_metadata.log")
+ABS_LIBRARY_ID_ENV = os.environ.get("ABS_LIBRARY_ID")
 
 # Сохраняем оригинальный print, чтобы дублировать вывод в лог
 ORIGINAL_PRINT = print
@@ -74,6 +75,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--library-id",
+        dest="library_id",
+        action="store",
+        default=ABS_LIBRARY_ID_ENV,
         help="Обрабатывать только одну библиотеку (ID). "
              "По умолчанию — все библиотеки с mediaType=book",
     )

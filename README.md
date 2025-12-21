@@ -145,6 +145,9 @@ services:
       # Путь к лог файлу
       ABS_LOG_FILE: "/data/fix_abs_metadata.log"
 
+      # ID библиотеки (UUID), если нужно обработать только одну (пусто = все book)
+      ABS_LIBRARY_ID: ""
+
       # Интервал между запусками (минуты). 0 — один проход и выход.
       ABS_RUN_INTERVAL_MINUTES: "60"
 
