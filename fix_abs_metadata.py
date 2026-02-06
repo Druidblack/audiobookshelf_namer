@@ -80,6 +80,15 @@ try:
 except ValueError:
     DEFAULT_HTTP_BACKOFF = 0.5
 
+# Размер страницы при запросе /api/libraries/<id>/items.
+# Важно: в API Audiobookshelf параметр limit=0 означает "без лимита", т.е. вернуть ВСЕ элементы,
+# что на больших библиотеках может занимать десятки секунд и приводить к ReadTimeout.
+ABS_LIBRARY_ITEMS_PAGE_SIZE_ENV = os.environ.get("ABS_LIBRARY_ITEMS_PAGE_SIZE", "200")
+try:
+    DEFAULT_LIBRARY_ITEMS_PAGE_SIZE = max(1, int(ABS_LIBRARY_ITEMS_PAGE_SIZE_ENV))
+except ValueError:
+    DEFAULT_LIBRARY_ITEMS_PAGE_SIZE = 200
+
 
 ABS_LOG_FILE_ENV = os.environ.get("ABS_LOG_FILE", "fix_abs_metadata.log")
 ABS_LIBRARY_ID_ENV = os.environ.get("ABS_LIBRARY_ID")
@@ -495,12 +504,43 @@ def get_library_item_ids(
     base_url: str,
     library_id: str,
 ) -> List[str]:
-    params = {"limit": 0}
-    resp = session.get(f"{base_url}/api/libraries/{library_id}/items", params=params)
-    resp.raise_for_status()
-    data = resp.json()
-    results = data.get("results", [])
-    return [item["id"] for item in results if item.get("mediaType") == "book"]
+    # Раньше здесь использовалось limit=0, что в ABS API означает "без лимита" (вернуть ВСЕ элементы).
+    # На больших библиотеках это может легко упираться в таймаут/память.
+    # Поэтому забираем id постранично.
+    page_size = DEFAULT_LIBRARY_ITEMS_PAGE_SIZE
+    page = 0
+    ids: List[str] = []
+
+    while True:
+        params = {
+            "limit": page_size,
+            "page": page,
+            # нам нужны только id, поэтому просим minified чтобы уменьшить payload
+            "minified": 1,
+        }
+        resp = session.get(f"{base_url}/api/libraries/{library_id}/items", params=params)
+        resp.raise_for_status()
+        data = resp.json() or {}
+        results = data.get("results", []) or []
+
+        # Бывает, что сервер отдаёт пустой results (или на последней странице)
+        if not results:
+            break
+
+        for item in results:
+            if item.get("mediaType") == "book" and item.get("id"):
+                ids.append(item["id"])
+
+        total = data.get("total")
+        if isinstance(total, int) and total >= 0 and len(ids) >= total:
+            break
+
+        if len(results) < page_size:
+            break
+
+        page += 1
+
+    return ids
 
 
 def batch_get_items(
