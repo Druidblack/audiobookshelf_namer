@@ -12,6 +12,12 @@ import builtins
 import sys
 
 import requests
+from requests.adapters import HTTPAdapter
+
+try:
+    from urllib3.util.retry import Retry
+except Exception:
+    Retry = None
 
 try:
     from PIL import Image
@@ -50,6 +56,30 @@ try:
     ABS_SCAN_CHECK_INTERVAL = max(1, int(ABS_SCAN_CHECK_INTERVAL_ENV))
 except ValueError:
     ABS_SCAN_CHECK_INTERVAL = 10
+
+
+# ======================================================================
+# HTTP/СЕТЬ: таймауты и повторы (для стабильности)
+# ======================================================================
+
+ABS_HTTP_TIMEOUT_ENV = os.environ.get("ABS_HTTP_TIMEOUT", "20")
+try:
+    DEFAULT_HTTP_TIMEOUT = float(ABS_HTTP_TIMEOUT_ENV)
+except ValueError:
+    DEFAULT_HTTP_TIMEOUT = 20.0
+
+ABS_HTTP_RETRIES_ENV = os.environ.get("ABS_HTTP_RETRIES", "5")
+try:
+    DEFAULT_HTTP_RETRIES = max(0, int(ABS_HTTP_RETRIES_ENV))
+except ValueError:
+    DEFAULT_HTTP_RETRIES = 5
+
+ABS_HTTP_BACKOFF_ENV = os.environ.get("ABS_HTTP_BACKOFF", "0.5")
+try:
+    DEFAULT_HTTP_BACKOFF = float(ABS_HTTP_BACKOFF_ENV)
+except ValueError:
+    DEFAULT_HTTP_BACKOFF = 0.5
+
 
 ABS_LOG_FILE_ENV = os.environ.get("ABS_LOG_FILE", "fix_abs_metadata.log")
 ABS_LIBRARY_ID_ENV = os.environ.get("ABS_LIBRARY_ID")
@@ -162,6 +192,47 @@ def chunked(seq: List[Any], size: int):
 def build_session(base_url: str, token: Optional[str]) -> Tuple[requests.Session, str]:
     base_url = base_url.rstrip("/")
     session = requests.Session()
+
+    # Настройка повторов для сетевых сбоев (в т.ч. Connection reset by peer)
+    if DEFAULT_HTTP_RETRIES > 0 and Retry is not None:
+        try:
+            retry = Retry(
+                total=DEFAULT_HTTP_RETRIES,
+                connect=DEFAULT_HTTP_RETRIES,
+                read=DEFAULT_HTTP_RETRIES,
+                status=DEFAULT_HTTP_RETRIES,
+                backoff_factor=DEFAULT_HTTP_BACKOFF,
+                status_forcelist=(429, 502, 503, 504),
+                allowed_methods=frozenset(["GET", "POST", "HEAD", "OPTIONS"]),
+                raise_on_status=False,
+            )
+        except TypeError:
+            # urllib3<2 совместимость
+            retry = Retry(
+                total=DEFAULT_HTTP_RETRIES,
+                connect=DEFAULT_HTTP_RETRIES,
+                read=DEFAULT_HTTP_RETRIES,
+                status=DEFAULT_HTTP_RETRIES,
+                backoff_factor=DEFAULT_HTTP_BACKOFF,
+                status_forcelist=(429, 502, 503, 504),
+                method_whitelist=["GET", "POST", "HEAD", "OPTIONS"],
+                raise_on_status=False,
+            )
+
+        adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+
+    # Дефолтный таймаут на все запросы (если не указан явно в конкретном вызове)
+    _orig_request = session.request
+
+    def _request(method, url, **kwargs):
+        kwargs.setdefault("timeout", DEFAULT_HTTP_TIMEOUT)
+        return _orig_request(method, url, **kwargs)
+
+    # Важно: кладём на инстанс, чтобы session.get/post/patch ходили через него
+    session.request = _request  # type: ignore[assignment]
+
     headers: Dict[str, str] = {}
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -1637,6 +1708,9 @@ def main() -> None:
     print("Используем настройки:")
     print(f"  base_url          = {base_url!r}")
     print(f"  token             = {'<указан>' if args.token else '<НЕ указан>'}")
+    print(f"  http_timeout      = {DEFAULT_HTTP_TIMEOUT} sec (ABS_HTTP_TIMEOUT)")
+    print(f"  http_retries      = {DEFAULT_HTTP_RETRIES} (ABS_HTTP_RETRIES)")
+    print(f"  http_backoff      = {DEFAULT_HTTP_BACKOFF} (ABS_HTTP_BACKOFF)")
     print(f"  dry_run           = {args.dry_run}")
     print(f"  use_fantlab_chain = {args.use_fantlab}")
     print(f"  fantlab_provider  = {args.fantlab_provider!r}")
@@ -1656,10 +1730,15 @@ def main() -> None:
 
     if interval_min <= 0:
         # Одиночный запуск — сначала ждём окончания сканирования
-        wait_while_abs_scanning(session, base_url)
-        run_once(args, session, base_url, state, use_cache)
-        if use_cache and not args.dry_run:
-            save_state(args.cache_file, state)
+        try:
+            wait_while_abs_scanning(session, base_url)
+            run_once(args, session, base_url, state, use_cache)
+            if use_cache and not args.dry_run:
+                save_state(args.cache_file, state)
+        except requests.exceptions.RequestException as e:
+            print(f"[ABS] Ошибка сети/соединения: {e}")
+        except Exception as e:
+            print(f"[ERROR] Неожиданная ошибка: {e}")
     else:
         print(f"Автоматический режим: скрипт будет выполняться каждые {interval_min} минут.")
         iteration = 0
@@ -1671,10 +1750,21 @@ def main() -> None:
 
             print(f"\n===== Итерация {iteration} =====")
             # Перед каждой итерацией ждём окончания сканирования
-            wait_while_abs_scanning(session, base_url)
-            run_once(args, session, base_url, state, use_cache)
-            if use_cache and not args.dry_run:
-                save_state(args.cache_file, state)
+            try:
+                wait_while_abs_scanning(session, base_url)
+                run_once(args, session, base_url, state, use_cache)
+                if use_cache and not args.dry_run:
+                    save_state(args.cache_file, state)
+            except requests.exceptions.RequestException as e:
+                print(f"[ABS] Ошибка сети/соединения: {e}. Итерация будет пропущена.")
+                # На случай "протухшего" keep-alive соединения пересоздаём сессию
+                try:
+                    session.close()
+                except Exception:
+                    pass
+                session, base_url = build_session(args.base_url, args.token)
+            except Exception as e:
+                print(f"[ERROR] Неожиданная ошибка: {e}. Итерация будет пропущена.")
 
             print(f"\nОжидание {interval_min} минут до следующего запуска...")
             try:
