@@ -860,6 +860,53 @@ def _normalize_author_name(name: str) -> str:
 
 
 
+def _dedupe_author_names(author_names: List[str]) -> List[str]:
+    """
+    Удаляем дубли авторов с сохранением исходного порядка.
+    Для сравнения используем нормализованное имя.
+    """
+    unique_names: List[str] = []
+    seen: set = set()
+
+    for raw_name in author_names or []:
+        clean_name = str(raw_name or "").strip()
+        if not clean_name:
+            continue
+
+        norm_name = _normalize_author_name(clean_name)
+        if not norm_name or norm_name in seen:
+            continue
+
+        seen.add(norm_name)
+        unique_names.append(clean_name)
+
+    return unique_names
+
+
+
+def _metadata_author_names(metadata: Optional[Dict[str, Any]]) -> List[str]:
+    metadata = metadata or {}
+    authors_meta = metadata.get("authors") or []
+    names: List[str] = []
+
+    if isinstance(authors_meta, list):
+        for a in authors_meta:
+            if isinstance(a, dict) and a.get("name"):
+                names.append(str(a["name"]).strip())
+            elif isinstance(a, str):
+                names.append(a.strip())
+
+    return _dedupe_author_names(names)
+
+
+
+def _authors_changed(current_author_names: List[str], new_author_names: List[str]) -> bool:
+    current_norm = {_normalize_author_name(name) for name in _dedupe_author_names(current_author_names) if _normalize_author_name(name)}
+    new_norm = {_normalize_author_name(name) for name in _dedupe_author_names(new_author_names) if _normalize_author_name(name)}
+    return current_norm != new_norm
+
+
+
 def extract_author_names_from_result(result: Dict[str, Any]) -> List[str]:
     """
     Достаём авторов из результата провайдера:
@@ -878,7 +925,7 @@ def extract_author_names_from_result(result: Dict[str, Any]) -> List[str]:
             elif isinstance(a, str):
                 author_names.append(a.strip())
 
-    return [n for n in (s.strip() for s in author_names) if n]
+    return _dedupe_author_names([n for n in (s.strip() for s in author_names) if n])
 
 
 def is_author_compatible(search_author: Optional[str], result: Dict[str, Any]) -> bool:
@@ -1132,19 +1179,24 @@ def search_fantlab_book(
 # ПРИМЕНЕНИЕ МЕТАДАННЫХ ПРОВАЙДЕРА
 # ======================================================================
 
-def build_fantlab_metadata_updates(result: Dict[str, Any]) -> Dict[str, Any]:
+def build_fantlab_metadata_updates(
+    result: Dict[str, Any],
+    current_metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """
     Унифицированный сбор метаданных из результата /api/search/books
     (FantLab/Google Books/Audible и др.).
     """
     updates: Dict[str, Any] = {}
+    current_metadata = current_metadata or {}
 
     fl_title = result.get("title")
-    if fl_title:
+    if fl_title and fl_title != current_metadata.get("title"):
         updates["title"] = fl_title
 
-    author_names = extract_author_names_from_result(result)
-    if author_names:
+    author_names = _dedupe_author_names(extract_author_names_from_result(result))
+    current_author_names = _metadata_author_names(current_metadata)
+    if author_names and _authors_changed(current_author_names, author_names):
         updates["authors"] = [{"name": name} for name in author_names]
 
     subtitle = result.get("subtitle")
@@ -1343,10 +1395,9 @@ def process_book_item(
         "parsed_title": None,
     }
 
-    authors_meta = meta.get("authors") or []
-    if authors_meta:
-        names = [a.get("name") for a in authors_meta if a.get("name")]
-        log_info["old_author"] = ", ".join(names) if names else None
+    current_author_names = _metadata_author_names(meta)
+    if current_author_names:
+        log_info["old_author"] = ", ".join(current_author_names) if current_author_names else None
 
     narrators = meta.get("narrators") or []
     if narrators:
@@ -1368,6 +1419,7 @@ def process_book_item(
     log_info["artist_tag"] = tag_artist
 
     authors_from_album, title_from_album = extract_authors_title_from_album(tag_album)
+    authors_from_album = _dedupe_author_names(authors_from_album)
     log_info["parsed_authors"] = authors_from_album
     log_info["parsed_title"] = title_from_album
 
@@ -1375,7 +1427,7 @@ def process_book_item(
         return None, log_info
 
     new_title = title_from_album
-    new_authors = authors_from_album
+    new_authors = _dedupe_author_names(authors_from_album)
     new_narrator = tag_artist.strip() if tag_artist else None
 
     updates: Dict[str, Any] = {}
@@ -1384,7 +1436,7 @@ def process_book_item(
         updates["title"] = new_title
 
     new_authors_objs = [{"name": name} for name in new_authors]
-    if new_authors_objs:
+    if new_authors_objs and _authors_changed(current_author_names, new_authors):
         updates["authors"] = new_authors_objs
 
     curr_narrator_name = narrators[0] if narrators else None
@@ -1454,6 +1506,8 @@ def run_once(args: argparse.Namespace,
 
                 # Текущее состояние тегов из файлов
                 curr_album, curr_artist = extract_file_album_artist(item)
+                media = item.get("media") or {}
+                meta = media.get("metadata") or {}
 
                 # Решаем, нужно ли повторно обрабатывать теги
                 should_process_tags = True
@@ -1487,11 +1541,8 @@ def run_once(args: argparse.Namespace,
                     total_tags_skipped += 1
 
                     # Минимальная info для провайдеров
-                    media = item.get("media") or {}
-                    meta = media.get("metadata") or {}
-                    authors_meta = meta.get("authors") or []
-                    names = [a.get("name") for a in authors_meta if a.get("name")]
-                    old_author = ", ".join(names) if names else None
+                    current_author_names = _metadata_author_names(meta)
+                    old_author = ", ".join(current_author_names) if current_author_names else None
                     narrators = meta.get("narrators") or []
                     old_narrator = narrators[0] if narrators else None
 
@@ -1610,7 +1661,7 @@ def run_once(args: argparse.Namespace,
                                     f"{ab_result.get('title')!r} — {ab_result.get('author') or ab_result.get('authors')!r}"
                                 )
 
-                                ab_updates = build_fantlab_metadata_updates(ab_result)
+                                ab_updates = build_fantlab_metadata_updates(ab_result, current_metadata=meta)
                                 if ab_updates:
                                     print(f"  [Audible] Обновляем поля: {list(ab_updates.keys())}")
                                     patch_book_metadata(
@@ -1646,7 +1697,7 @@ def run_once(args: argparse.Namespace,
                                 f"{gb_result.get('title')!r} — {gb_result.get('author') or gb_result.get('authors')!r}"
                             )
 
-                            gb_updates = build_fantlab_metadata_updates(gb_result)
+                            gb_updates = build_fantlab_metadata_updates(gb_result, current_metadata=meta)
                             if gb_updates:
                                 print(f"  [Google] Обновляем поля: {list(gb_updates.keys())}")
                                 patch_book_metadata(
@@ -1682,7 +1733,7 @@ def run_once(args: argparse.Namespace,
                             f"{fl_result.get('title')!r} — {fl_result.get('author') or fl_result.get('authors')!r}"
                         )
 
-                        fl_updates = build_fantlab_metadata_updates(fl_result)
+                        fl_updates = build_fantlab_metadata_updates(fl_result, current_metadata=meta)
                         if fl_updates:
                             print(f"  [FantLab] Обновляем поля: {list(fl_updates.keys())}")
                             patch_book_metadata(
